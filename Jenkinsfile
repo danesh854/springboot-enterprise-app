@@ -2,157 +2,270 @@ pipeline {
 
     agent any
 
+
     tools {
         maven 'maven3'
+        jdk 'java17'
     }
 
+
     environment {
+
         DOCKER_IMAGE = "daneshkabade45/springboot-enterprise-app"
+
         NAMESPACE = "application"
-        DEPLOYMENT = "springboot-app"
-        CONTAINER = "springboot-container"
+
+        CONTAINER_NAME = "springboot-container"
+
+        SERVICE_NAME = "springboot-service"
+
     }
+
 
     stages {
 
 
         stage('Checkout Code') {
+
             steps {
+
                 git branch: 'main',
+                credentialsId: 'github-creds',
                 url: 'https://github.com/danesh854/springboot-enterprise-app.git'
+
             }
+
         }
+
+
 
 
         stage('Maven Build') {
+
             steps {
+
                 sh '''
+
                 echo "Building Spring Boot Application"
-                mvn clean package
+
+                mvn clean package -DskipTests
+
                 '''
+
             }
+
         }
+
+
+
 
 
         stage('Docker Build') {
+
             steps {
+
                 sh '''
+
                 echo "Building Docker Image"
 
-                docker build -t $DOCKER_IMAGE:${BUILD_NUMBER} .
+                docker build \
+                -t $DOCKER_IMAGE:$BUILD_NUMBER .
+
 
                 docker tag \
-                $DOCKER_IMAGE:${BUILD_NUMBER} \
+                $DOCKER_IMAGE:$BUILD_NUMBER \
                 $DOCKER_IMAGE:latest
+
                 '''
+
             }
+
         }
+
+
+
+
 
 
         stage('Docker Push') {
 
+
             steps {
 
+
                 withCredentials([
+
                     usernamePassword(
-                        credentialsId: 'dockerhub-creds',
+
+                        credentialsId: 'dockerhub',
+
                         usernameVariable: 'DOCKER_USER',
+
                         passwordVariable: 'DOCKER_PASS'
+
                     )
+
                 ]) {
 
-                    sh '''
-                    echo "Login DockerHub"
 
-                    echo $DOCKER_PASS | \
-                    docker login \
+                    sh '''
+
+                    echo "Docker Login"
+
+                    echo $DOCKER_PASS | docker login \
                     -u $DOCKER_USER \
                     --password-stdin
 
 
-                    echo "Pushing Version Image"
 
-                    docker push \
-                    $DOCKER_IMAGE:${BUILD_NUMBER}
+                    echo "Push version image"
+
+                    docker push $DOCKER_IMAGE:$BUILD_NUMBER
 
 
-                    echo "Pushing Latest Image"
 
-                    docker push \
-                    $DOCKER_IMAGE:latest
+                    echo "Push latest image"
+
+                    docker push $DOCKER_IMAGE:latest
+
                     '''
+
                 }
+
             }
+
         }
 
 
 
-        stage('Deploy To EKS') {
+
+
+
+        stage('Blue Green Deployment') {
+
 
             steps {
 
+
                 sh '''
 
-                echo "Deploying Application To EKS"
+                echo "Finding current production environment"
+
+
+                CURRENT=$(kubectl get service $SERVICE_NAME \
+                -n $NAMESPACE \
+                -o jsonpath='{.spec.selector.version}')
+
+
+                echo "Current Environment: $CURRENT"
+
+
+
+                if [ "$CURRENT" = "blue" ]
+
+                then
+
+                    NEW_ENV="green"
+
+                else
+
+                    NEW_ENV="blue"
+
+                fi
+
+
+
+                echo "Deploying new version into $NEW_ENV"
+
 
 
                 kubectl set image \
-                deployment/$DEPLOYMENT \
-                $CONTAINER=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                deployment/springboot-$NEW_ENV \
+                $CONTAINER_NAME=$DOCKER_IMAGE:$BUILD_NUMBER \
                 -n $NAMESPACE
 
 
 
-                echo "Saving deployment history"
 
-
-                kubectl annotate deployment \
-                $DEPLOYMENT \
-                kubernetes.io/change-cause="Jenkins deployed image $DOCKER_IMAGE:${BUILD_NUMBER}" \
-                -n $NAMESPACE \
-                --overwrite
-
-
-
-                echo "Checking rollout"
+                echo "Waiting for deployment health"
 
 
                 kubectl rollout status \
-                deployment/$DEPLOYMENT \
-                -n $NAMESPACE
+                deployment/springboot-$NEW_ENV \
+                -n $NAMESPACE \
+                --timeout=120s
+
+
+
+
+                echo "Switching traffic to $NEW_ENV"
+
+
+
+                kubectl patch service $SERVICE_NAME \
+                -n $NAMESPACE \
+                -p "{\\"spec\\":{\\"selector\\":{\\"app\\":\\"springboot\\",\\"version\\":\\"$NEW_ENV\\"}}}"
+
+
+
+
+                echo "Traffic switched to $NEW_ENV successfully"
 
                 '''
 
             }
 
         }
+
+
+
+
 
 
 
         stage('Verify Deployment') {
 
+
             steps {
+
 
                 sh '''
 
-                echo "Pods Status"
+                echo "Current Active Environment"
 
-                kubectl get pods \
+
+                kubectl describe service \
+                $SERVICE_NAME \
                 -n $NAMESPACE
 
 
-                echo "Current Running Image"
 
-                kubectl describe deployment \
-                $DEPLOYMENT \
-                -n $NAMESPACE | grep Image
+                echo "Running Pods"
+
+
+                kubectl get pods \
+                -n $NAMESPACE \
+                --show-labels
+
+
+                echo "Application Test"
+
+
+                curl -I \
+                http://k8s-applicat-springbo-ccdab34c95-1432777456.ap-south-1.elb.amazonaws.com \
+                || true
 
                 '''
 
             }
+
         }
 
+
     }
+
+
+
 
 
     post {
@@ -160,7 +273,7 @@ pipeline {
 
         success {
 
-            echo "Pipeline completed successfully 🚀"
+            echo "BLUE GREEN DEPLOYMENT SUCCESSFUL 🚀"
 
         }
 
@@ -168,20 +281,11 @@ pipeline {
 
         failure {
 
-            echo "Deployment failed. Rolling back..."
+            echo "Deployment failed"
 
-            sh '''
+            echo "Traffic was not switched if new environment failed"
 
-            kubectl rollout undo \
-            deployment/$DEPLOYMENT \
-            -n $NAMESPACE || true
-
-
-            kubectl rollout status \
-            deployment/$DEPLOYMENT \
-            -n $NAMESPACE || true
-
-            '''
+            echo "Previous environment is still serving users"
 
         }
 
