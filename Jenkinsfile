@@ -39,7 +39,6 @@ pipeline {
 
 
 
-
         stage('Maven Build') {
 
             steps {
@@ -58,6 +57,46 @@ pipeline {
 
 
 
+        stage('SonarQube Analysis') {
+
+            steps {
+
+                withSonarQubeEnv('sonarqube') {
+
+                    sh '''
+
+                    echo "Running SonarQube Scan"
+
+                    mvn sonar:sonar \
+                    -Dsonar.projectKey=springboot-enterprise-app \
+                    -Dsonar.projectName=springboot-enterprise-app
+
+                    '''
+
+                }
+
+            }
+
+        }
+
+
+
+        stage('SonarQube Quality Gate') {
+
+            steps {
+
+                timeout(time: 5, unit: 'MINUTES') {
+
+                    waitForQualityGate abortPipeline: true
+
+                }
+
+            }
+
+        }
+
+
+
 
 
         stage('Docker Build') {
@@ -67,6 +106,7 @@ pipeline {
                 sh '''
 
                 echo "Building Docker Image"
+
 
                 docker build \
                 -t $DOCKER_IMAGE:$BUILD_NUMBER .
@@ -112,21 +152,18 @@ pipeline {
 
                     echo "Docker Login"
 
+
                     echo $DOCKER_PASS | docker login \
                     -u $DOCKER_USER \
                     --password-stdin
 
 
 
-                    echo "Push version image"
-
                     docker push $DOCKER_IMAGE:$BUILD_NUMBER
 
 
-
-                    echo "Push latest image"
-
                     docker push $DOCKER_IMAGE:latest
+
 
                     '''
 
@@ -175,7 +212,7 @@ pipeline {
 
 
 
-                echo "Deploying new version into $NEW_ENV"
+                echo "Deploying $NEW_ENV environment"
 
 
 
@@ -187,9 +224,6 @@ pipeline {
 
 
 
-                echo "Waiting for deployment health"
-
-
                 kubectl rollout status \
                 deployment/springboot-$NEW_ENV \
                 -n $NAMESPACE \
@@ -198,7 +232,8 @@ pipeline {
 
 
 
-                echo "Switching traffic to $NEW_ENV"
+
+                echo "Switching Traffic"
 
 
 
@@ -209,14 +244,14 @@ pipeline {
 
 
 
-                echo "Traffic switched to $NEW_ENV successfully"
+                echo "Traffic switched successfully"
+
 
                 '''
 
             }
 
         }
-
 
 
 
@@ -231,7 +266,7 @@ pipeline {
 
                 sh '''
 
-                echo "Current Active Environment"
+                echo "Checking Service"
 
 
                 kubectl describe service \
@@ -240,7 +275,7 @@ pipeline {
 
 
 
-                echo "Running Pods"
+                echo "Checking Pods"
 
 
                 kubectl get pods \
@@ -248,12 +283,14 @@ pipeline {
                 --show-labels
 
 
-                echo "Application Test"
+
+                echo "Testing Application"
 
 
                 curl -I \
                 http://k8s-applicat-springbo-ccdab34c95-1432777456.ap-south-1.elb.amazonaws.com \
                 || true
+
 
                 '''
 
@@ -281,11 +318,9 @@ pipeline {
 
         failure {
 
-            echo "Deployment failed"
+            echo "Pipeline failed"
 
-            echo "Traffic was not switched if new environment failed"
-
-            echo "Previous environment is still serving users"
+            echo "Existing production environment remains active"
 
         }
 
@@ -293,24 +328,3 @@ pipeline {
 
 }
 
-
-stage('SonarQube Analysis') {
-    steps {
-        withSonarQubeEnv('sonarqube') {
-            sh '''
-            mvn sonar:sonar \
-            -Dsonar.projectKey=springboot-enterprise-app \
-            -Dsonar.projectName=springboot-enterprise-app
-            '''
-        }
-    }
-}
-
-
-stage('SonarQube Quality Gate') {
-    steps {
-        timeout(time: 5, unit: 'MINUTES') {
-            waitForQualityGate abortPipeline: true
-        }
-    }
-}
